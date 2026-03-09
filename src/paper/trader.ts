@@ -1,19 +1,58 @@
 import type { Token, Signal, PaperTrade, SessionStats } from "../types.js";
 import { TOKENS } from "../types.js";
 import { WindowManager } from "../engine/window.js";
+import {
+  saveTrade,
+  updateTradeResolution,
+  loadUnresolvedTrades,
+  loadRecentTrades,
+  loadAllResolvedTrades,
+  loadStats,
+} from "../db.js";
 
 /**
  * Paper trading execution and tracking.
- * Simulates placing bets and resolving them at window end.
+ * All trades persisted to SQLite — survives restarts.
  */
 export class PaperTrader {
-  private trades: PaperTrade[] = [];
   private pendingTrades: PaperTrade[] = [];
   private tradeCounter = 0;
   private peakPnl = 0;
   private maxDrawdown = 0;
 
-  constructor(private windowManager: WindowManager) {}
+  constructor(private windowManager: WindowManager) {
+    this.restore();
+  }
+
+  /**
+   * Restore unresolved trades and stats from DB on startup.
+   */
+  private restore(): void {
+    // Restore pending trades from previous session
+    const unresolved = loadUnresolvedTrades();
+    this.pendingTrades = unresolved;
+
+    // Set trade counter from DB
+    const dbStats = loadStats();
+    const pendingCount = unresolved.length;
+    this.tradeCounter = dbStats.totalTrades + pendingCount;
+
+    // Recalculate peak/drawdown from all historical trades
+    const allTrades = loadAllResolvedTrades();
+    let runningPnl = 0;
+    for (const trade of allTrades) {
+      runningPnl += trade.pnl ?? 0;
+      if (runningPnl > this.peakPnl) this.peakPnl = runningPnl;
+      const dd = this.peakPnl - runningPnl;
+      if (dd > this.maxDrawdown) this.maxDrawdown = dd;
+    }
+
+    if (this.tradeCounter > 0) {
+      console.log(
+        `📂 Restored ${dbStats.totalTrades} resolved trades, ${pendingCount} pending | P&L: $${dbStats.totalPnl.toFixed(2)}`
+      );
+    }
+  }
 
   /**
    * Execute a paper trade based on signal.
@@ -39,15 +78,16 @@ export class PaperTrader {
     };
 
     this.pendingTrades.push(trade);
-    this.trades.push(trade);
     this.windowManager.markBetPlaced(signal.token);
+
+    // Persist to SQLite
+    saveTrade(trade);
 
     return trade;
   }
 
   /**
    * Resolve all pending trades for the previous window.
-   * Called when a new window starts.
    */
   resolveWindow(previousWindowId: string): PaperTrade[] {
     const resolved: PaperTrade[] = [];
@@ -58,7 +98,6 @@ export class PaperTrader {
       const state = this.windowManager.getState(trade.token);
       const resolutionPrice = state.currentPrice;
 
-      // Determine if trade won
       const priceWentUp = resolutionPrice > trade.referencePrice;
       const priceWentDown = resolutionPrice < trade.referencePrice;
 
@@ -69,15 +108,10 @@ export class PaperTrader {
         won = priceWentDown;
       }
 
-      // If exactly equal, it's a push — return stake (treat as loss for simplicity)
       if (resolutionPrice === trade.referencePrice) {
         won = false;
       }
 
-      // Calculate P&L
-      // If won: receive $1 per share, paid entryPrice per share
-      // shares = size / entryPrice
-      // P&L = shares * (1 - entryPrice) if won, -size if lost
       const shares = trade.size / trade.entryPrice;
       const pnl = won ? shares * (1 - trade.entryPrice) : -trade.size;
 
@@ -86,53 +120,39 @@ export class PaperTrader {
       trade.pnl = Math.round(pnl * 100) / 100;
       trade.resolutionPrice = resolutionPrice;
 
+      // Persist resolution to SQLite
+      updateTradeResolution(trade);
+
       resolved.push(trade);
     }
 
-    // Remove resolved from pending
     this.pendingTrades = this.pendingTrades.filter((t) => !t.resolved);
-
     return resolved;
   }
 
   /**
-   * Get comprehensive session statistics.
+   * Get comprehensive session statistics (from DB).
    */
   getStats(): SessionStats {
-    const resolvedTrades = this.trades.filter((t) => t.resolved);
+    const dbStats = loadStats();
 
     const byToken = {} as SessionStats["byToken"];
     for (const t of TOKENS) {
-      byToken[t] = { trades: 0, wins: 0, pnl: 0 };
+      byToken[t] = dbStats.byToken[t] || { trades: 0, wins: 0, pnl: 0 };
     }
 
-    let totalPnl = 0;
-    let totalWagered = 0;
-    let wins = 0;
-
-    for (const trade of resolvedTrades) {
-      totalPnl += trade.pnl ?? 0;
-      totalWagered += trade.size;
-      if (trade.won) wins++;
-
-      byToken[trade.token].trades++;
-      if (trade.won) byToken[trade.token].wins++;
-      byToken[trade.token].pnl += trade.pnl ?? 0;
-    }
-
-    // Track peak P&L and max drawdown
-    if (totalPnl > this.peakPnl) this.peakPnl = totalPnl;
-    const currentDrawdown = this.peakPnl - totalPnl;
+    // Update peak/drawdown
+    if (dbStats.totalPnl > this.peakPnl) this.peakPnl = dbStats.totalPnl;
+    const currentDrawdown = this.peakPnl - dbStats.totalPnl;
     if (currentDrawdown > this.maxDrawdown) this.maxDrawdown = currentDrawdown;
 
     return {
-      totalTrades: resolvedTrades.length,
-      wins,
-      losses: resolvedTrades.length - wins,
-      totalPnl: Math.round(totalPnl * 100) / 100,
-      totalWagered: Math.round(totalWagered * 100) / 100,
-      winRate:
-        resolvedTrades.length > 0 ? wins / resolvedTrades.length : 0,
+      totalTrades: dbStats.totalTrades,
+      wins: dbStats.wins,
+      losses: dbStats.losses,
+      totalPnl: dbStats.totalPnl,
+      totalWagered: dbStats.totalWagered,
+      winRate: dbStats.totalTrades > 0 ? dbStats.wins / dbStats.totalTrades : 0,
       peakPnl: Math.round(this.peakPnl * 100) / 100,
       maxDrawdown: Math.round(this.maxDrawdown * 100) / 100,
       byToken,
@@ -144,6 +164,6 @@ export class PaperTrader {
   }
 
   getAllTrades(): PaperTrade[] {
-    return [...this.trades];
+    return loadRecentTrades(50);
   }
 }

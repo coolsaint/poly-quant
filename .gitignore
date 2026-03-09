@@ -4,4 +4,5 @@ dashboard/dist/
 dashboard/node_modules/
 .env
 *.log
+data/
 .claude/
