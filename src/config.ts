@@ -7,21 +7,21 @@ export const config: Config = {
   maxBetPerWindow: 40,
   windowMinutes: 15,
 
-  // Gate 1: Time — only bet in last 60 seconds of window
-  minTimeLeftSec: 5, // Don't bet with <5s left (slippage risk)
-  maxTimeLeftSec: 60, // Don't bet with >60s left (too early)
+  // Gate 1: Time — only bet in last 90 seconds of window
+  minTimeLeftSec: 5,
+  maxTimeLeftSec: 90,
 
-  // Gate 2: Price gap — minimum 0.15% gap from reference
-  minGapPercent: 0.15,
+  // Gate 2: Price gap — minimum 0.10% gap from reference
+  minGapPercent: 0.10,
 
-  // Gate 3: Volatility — max 0.03% rolling 60s volatility
-  maxVolatility: 0.03,
+  // Gate 3: Volatility — max 0.12% rolling 60s volatility
+  maxVolatility: 0.12,
 
-  // Gate 4: Confidence — minimum 85%
-  minConfidence: 0.85,
+  // Gate 4: Confidence — minimum 80%
+  minConfidence: 0.80,
 
-  // Gate 5: Edge — minimum 10% after fees
-  minEdge: 0.10,
+  // Gate 5: Edge — minimum 8% after fees
+  minEdge: 0.08,
 
   // Fees & sizing
   takerFeeRate: 0.0156, // Polymarket taker fee rate
