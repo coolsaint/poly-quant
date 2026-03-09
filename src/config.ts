@@ -17,11 +17,11 @@ export const config: Config = {
   // Gate 3: Volatility — max 0.12% rolling 60s volatility
   maxVolatility: 0.12,
 
-  // Gate 4: Confidence — minimum 80%
-  minConfidence: 0.80,
+  // Gate 4: Confidence — minimum 70% (paper trading, will tighten for live)
+  minConfidence: 0.70,
 
-  // Gate 5: Edge — minimum 8% after fees
-  minEdge: 0.08,
+  // Gate 5: Edge — minimum 5% after fees (paper trading, will tighten for live)
+  minEdge: 0.05,
 
   // Fees & sizing
   takerFeeRate: 0.0156, // Polymarket taker fee rate

@@ -49,11 +49,18 @@ export class SignalEngine {
     const volSafe = vol > 100 ? 0 : vol;
 
     // Confidence (computed regardless of gates)
+    // Base: gap drives confidence (0.10% → 57%, 0.30% → 70%, 0.50% → 83%, 0.60%+ → 90%+)
     let confidence = 0.5 + (absGapPercent / 0.6) * 0.4;
     confidence = Math.min(0.95, Math.max(0.5, confidence));
-    const timeFactor = 1 - (timeLeftSec / 300) * 0.2;
+
+    // Time factor: less time = more locked in (at 90s: 0.94, at 30s: 0.98, at 5s: 1.0)
+    const timeFactor = 1 - (timeLeftSec / 900) * 0.06;
     confidence *= timeFactor;
-    const volFactor = Math.max(0.6, 1 - volSafe * 15);
+
+    // Vol factor: scale relative to maxVolatility threshold
+    // At 0% vol → 1.0, at maxVol → 0.85, above maxVol → clamped at 0.80
+    const volRatio = volSafe / config.maxVolatility; // 0 to 1+ range
+    const volFactor = Math.max(0.80, 1 - volRatio * 0.15);
     confidence *= volFactor;
 
     // Polymarket simulated price & edge
