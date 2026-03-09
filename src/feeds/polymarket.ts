@@ -1,69 +1,330 @@
+import { EventEmitter } from "events";
+import type { Token } from "../types.js";
+
 /**
- * Polymarket price simulator for paper trading.
+ * Polymarket CLOB API slugs for 15-minute crypto markets.
  *
- * In paper trading mode, we simulate Polymarket odds based on the
- * price gap from reference. In live mode, this would connect to
- * the Polymarket CLOB WebSocket / REST API.
+ * Slug pattern: {token}-updown-15m-{window_start_unix}
+ * Windows align to 15-minute boundaries in UTC.
  *
- * The simulation models how Polymarket odds typically behave:
- * - At window start (price near ref): ~50/50
- * - As gap grows: odds shift toward the leading direction
- * - Market makers are somewhat efficient but lag real price by ~5-15s
- * - There's noise/spread in the odds
+ * Resolution source: Chainlink data streams (e.g., btc-usd)
  */
-export class PolymarketSimulator {
-  /**
-   * Simulate what Polymarket "Up" token would cost given the current gap.
-   *
-   * This models the empirical relationship between Binance price gap
-   * and Polymarket odds. Market makers on Polymarket adjust odds based
-   * on the same price feed, but with lag and noise.
-   *
-   * @param gapPercent - Current price gap from reference (positive = up)
-   * @param timeLeftSec - Seconds remaining in window
-   * @returns Simulated price for "Up" token (0.01 to 0.99)
-   */
-  getSimulatedUpPrice(gapPercent: number, timeLeftSec: number): number {
-    // Base probability from gap using logistic function
-    // At 0% gap → 0.50, at 0.3% gap → ~0.75, at 0.5% gap → ~0.88
-    const k = 8; // Steepness — how quickly odds shift with gap
-    const baseProbability = 1 / (1 + Math.exp(-k * gapPercent));
 
-    // Time factor: as time runs out, odds converge more to true direction
-    // With more time left, odds are closer to 50/50 (more uncertainty)
-    const timeFactor = 1 - timeLeftSec / 900; // 0 at window start, 1 at end
-    const adjustedProbability =
-      0.5 + (baseProbability - 0.5) * (0.6 + 0.4 * timeFactor);
+const SLUG_PREFIX: Record<Token, string> = {
+  BTC: "btc-updown-15m",
+  ETH: "eth-updown-15m",
+  SOL: "sol-updown-15m",
+  XRP: "xrp-updown-15m",
+};
 
-    // Add market maker noise (±2%)
-    const noise = (Math.random() - 0.5) * 0.04;
+const GAMMA_BASE = "https://gamma-api.polymarket.com";
+const CLOB_BASE = "https://clob.polymarket.com";
 
-    // Add spread (market maker takes ~2-3 cents)
-    // If you're buying the likely direction, you pay slightly more
-    const spread = 0.02;
-    const withSpread =
-      gapPercent > 0
-        ? adjustedProbability + spread / 2 // Buying Up when price is up = pay premium
-        : adjustedProbability - spread / 2; // Buying Up when price is down = get discount
+interface MarketInfo {
+  conditionId: string;
+  upTokenId: string;
+  downTokenId: string;
+  slug: string;
+  windowStart: number; // unix seconds
+}
 
-    const final = Math.max(0.02, Math.min(0.98, withSpread + noise));
-    return Math.round(final * 100) / 100;
+interface TokenMarketState {
+  market: MarketInfo | null;
+  upPrice: number;
+  downPrice: number;
+  midpoint: number; // Up midpoint
+  bookDepth: number; // estimated from best bid/ask sizes
+  lastFetch: number;
+  fetchError: string | null;
+}
+
+/**
+ * Real Polymarket feed that polls CLOB API for live prices.
+ *
+ * For each 15-min window:
+ * 1. Computes the slug from the window start timestamp
+ * 2. Looks up the market via Gamma API → gets condition_id + token_ids
+ * 3. Polls CLOB midpoint for real prices
+ */
+export class PolymarketFeed extends EventEmitter {
+  private states = new Map<Token, TokenMarketState>();
+  private pollInterval: ReturnType<typeof setInterval> | null = null;
+  private marketLookupCache = new Map<string, MarketInfo>(); // slug → MarketInfo
+  private currentWindowStart = 0;
+
+  constructor(private tokens: Token[]) {
+    super();
+    for (const token of tokens) {
+      this.states.set(token, {
+        market: null,
+        upPrice: 0.5,
+        downPrice: 0.5,
+        midpoint: 0.5,
+        bookDepth: 100,
+        lastFetch: 0,
+        fetchError: null,
+      });
+    }
   }
 
   /**
-   * Simulate order book depth available at current price.
-   * Thin books are realistic for 15-min markets.
+   * Start polling Polymarket every 3 seconds.
    */
-  getSimulatedBookDepth(token: string): number {
-    const baseDepth: Record<string, number> = {
-      BTC: 350,
-      ETH: 200,
-      SOL: 125,
-      XRP: 100,
-    };
-    const base = baseDepth[token] ?? 100;
-    // Random variation ±30%
-    const variation = 0.7 + Math.random() * 0.6;
-    return Math.round(base * variation);
+  start(): void {
+    this.poll(); // immediate first poll
+    this.pollInterval = setInterval(() => this.poll(), 3000);
+    console.log("📡 Polymarket feed started (3s polling)");
+  }
+
+  stop(): void {
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
+  }
+
+  /**
+   * Get the current window start timestamp (15-min aligned, UTC).
+   */
+  private getWindowStart(): number {
+    const now = Math.floor(Date.now() / 1000);
+    return now - (now % 900); // align to 15-min boundary
+  }
+
+  /**
+   * Build the event slug for a token's current window.
+   */
+  private getSlug(token: Token, windowStart: number): string {
+    return `${SLUG_PREFIX[token]}-${windowStart}`;
+  }
+
+  /**
+   * Look up market info from Gamma API by slug.
+   */
+  private async lookupMarket(
+    token: Token,
+    slug: string
+  ): Promise<MarketInfo | null> {
+    // Check cache first
+    if (this.marketLookupCache.has(slug)) {
+      return this.marketLookupCache.get(slug)!;
+    }
+
+    try {
+      const url = `${GAMMA_BASE}/events/slug/${slug}`;
+      const res = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!res.ok) {
+        // Market might not exist yet (created ~1 min before window starts)
+        if (res.status === 404) return null;
+        throw new Error(`Gamma API ${res.status}`);
+      }
+
+      const event = await res.json();
+      const market = event.markets?.[0];
+      if (!market?.clobTokenIds) return null;
+
+      // clobTokenIds is a JSON string like '["tokenId1","tokenId2"]'
+      // outcomes is like '["Up","Down"]'
+      let tokenIds: string[];
+      let outcomes: string[];
+      try {
+        tokenIds =
+          typeof market.clobTokenIds === "string"
+            ? JSON.parse(market.clobTokenIds)
+            : market.clobTokenIds;
+        outcomes =
+          typeof market.outcomes === "string"
+            ? JSON.parse(market.outcomes)
+            : market.outcomes;
+      } catch {
+        // Fallback: tokens array from CLOB market data
+        tokenIds = [market.clobTokenIds[0], market.clobTokenIds[1]];
+        outcomes = ["Up", "Down"];
+      }
+
+      const upIdx = outcomes.indexOf("Up");
+      const downIdx = outcomes.indexOf("Down");
+
+      const info: MarketInfo = {
+        conditionId: market.conditionId,
+        upTokenId: tokenIds[upIdx] ?? tokenIds[0],
+        downTokenId: tokenIds[downIdx] ?? tokenIds[1],
+        slug,
+        windowStart: this.currentWindowStart,
+      };
+
+      this.marketLookupCache.set(slug, info);
+      this.emit("market-found", { token, slug, conditionId: info.conditionId });
+      return info;
+    } catch (err: any) {
+      this.emit("error", {
+        token,
+        error: `Market lookup failed: ${err.message}`,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Fetch midpoint price from CLOB API for a token ID.
+   */
+  private async fetchMidpoint(tokenId: string): Promise<number | null> {
+    try {
+      const url = `${CLOB_BASE}/midpoint?token_id=${tokenId}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.mid ? parseFloat(data.mid) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Fetch order book to get depth info.
+   */
+  private async fetchBookDepth(tokenId: string): Promise<number> {
+    try {
+      const url = `${CLOB_BASE}/book?token_id=${tokenId}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) return 100;
+      const data = await res.json();
+
+      // Sum up bid sizes as proxy for depth
+      let totalBidSize = 0;
+      for (const bid of data.bids || []) {
+        totalBidSize += parseFloat(bid.size) * parseFloat(bid.price);
+      }
+      let totalAskSize = 0;
+      for (const ask of data.asks || []) {
+        totalAskSize += parseFloat(ask.size) * parseFloat(ask.price);
+      }
+
+      return Math.max(totalBidSize, totalAskSize, 50);
+    } catch {
+      return 100;
+    }
+  }
+
+  /**
+   * Main poll cycle — runs every 3 seconds.
+   */
+  private async poll(): Promise<void> {
+    const windowStart = this.getWindowStart();
+    const windowChanged = windowStart !== this.currentWindowStart;
+    this.currentWindowStart = windowStart;
+
+    // If window changed, clear market cache for old windows
+    if (windowChanged) {
+      this.marketLookupCache.clear();
+      for (const token of this.tokens) {
+        const state = this.states.get(token)!;
+        state.market = null;
+      }
+      this.emit("window-change", { windowStart });
+    }
+
+    // Poll all tokens in parallel
+    await Promise.allSettled(
+      this.tokens.map((token) => this.pollToken(token, windowStart))
+    );
+  }
+
+  private async pollToken(token: Token, windowStart: number): Promise<void> {
+    const state = this.states.get(token)!;
+
+    // Step 1: Ensure we have market info
+    if (!state.market) {
+      const slug = this.getSlug(token, windowStart);
+      const market = await this.lookupMarket(token, slug);
+      if (!market) {
+        state.fetchError = "Market not found yet";
+        return;
+      }
+      state.market = market;
+    }
+
+    // Step 2: Fetch midpoint price
+    const midpoint = await this.fetchMidpoint(state.market.upTokenId);
+    if (midpoint !== null) {
+      state.midpoint = midpoint;
+      state.upPrice = midpoint;
+      state.downPrice = Math.round((1 - midpoint) * 100) / 100;
+      state.lastFetch = Date.now();
+      state.fetchError = null;
+
+      this.emit("price", {
+        token,
+        upPrice: state.upPrice,
+        downPrice: state.downPrice,
+        midpoint,
+      });
+    }
+
+    // Step 3: Fetch book depth less frequently (every ~15s)
+    if (Date.now() - state.lastFetch > 15000 || state.bookDepth === 100) {
+      const depth = await this.fetchBookDepth(state.market.upTokenId);
+      state.bookDepth = depth;
+    }
+  }
+
+  // ── Public API (used by SignalEngine) ──
+
+  /**
+   * Get the real Polymarket "Up" price for this token.
+   */
+  getUpPrice(token: Token): number {
+    return this.states.get(token)?.upPrice ?? 0.5;
+  }
+
+  /**
+   * Get the real Polymarket "Down" price for this token.
+   */
+  getDownPrice(token: Token): number {
+    return this.states.get(token)?.downPrice ?? 0.5;
+  }
+
+  /**
+   * Get midpoint (average of best bid/ask for Up token).
+   */
+  getMidpoint(token: Token): number {
+    return this.states.get(token)?.midpoint ?? 0.5;
+  }
+
+  /**
+   * Get estimated order book depth in USD.
+   */
+  getBookDepth(token: Token): number {
+    return this.states.get(token)?.bookDepth ?? 100;
+  }
+
+  /**
+   * Whether we have a live market for this token in the current window.
+   */
+  hasMarket(token: Token): boolean {
+    const state = this.states.get(token);
+    return !!(state?.market && state.lastFetch > 0);
+  }
+
+  /**
+   * Get the condition ID for the current market.
+   */
+  getConditionId(token: Token): string | null {
+    return this.states.get(token)?.market?.conditionId ?? null;
+  }
+
+  /**
+   * Get market state for a token (for dashboard display).
+   */
+  getState(token: Token): TokenMarketState | undefined {
+    return this.states.get(token);
   }
 }

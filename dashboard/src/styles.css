@@ -152,6 +152,26 @@ body {
 .gap.down { color: var(--red); }
 .gap.flat { color: var(--muted); }
 
+.poly-prices {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.poly-badge {
+  background: var(--green);
+  color: #000;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.poly-prices .up { color: var(--green); }
+.poly-prices .down { color: var(--red); }
+
 /* Signal Card */
 .signal-card {
   background: var(--card);

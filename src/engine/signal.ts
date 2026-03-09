@@ -1,18 +1,20 @@
 import type { Token, Signal } from "../types.js";
 import { config } from "../config.js";
 import { WindowManager } from "./window.js";
-import { PolymarketSimulator } from "../feeds/polymarket.js";
+import { PolymarketFeed } from "../feeds/polymarket.js";
 
 /**
  * 5-Gate Signal Engine
  *
  * Always computes all values so the dashboard can display real-time
  * gate status. Only `shouldBet` is gated by the 5 thresholds.
+ *
+ * Now uses REAL Polymarket prices from the CLOB API.
  */
 export class SignalEngine {
   constructor(
     private windowManager: WindowManager,
-    private polymarket: PolymarketSimulator
+    private polymarket: PolymarketFeed
   ) {}
 
   generateSignal(token: Token): Signal {
@@ -63,10 +65,26 @@ export class SignalEngine {
     const volFactor = Math.max(0.80, 1 - volRatio * 0.15);
     confidence *= volFactor;
 
-    // Polymarket simulated price & edge
-    const simUpPrice = this.polymarket.getSimulatedUpPrice(gapPercent, timeLeftSec);
-    const polyPrice = direction === "Up" ? simUpPrice : 1 - simUpPrice;
-    const takerFee = config.takerFeeRate * Math.min(polyPrice, 1 - polyPrice) * 2;
+    // ── Real Polymarket price ──
+    let polyPrice: number;
+    const hasRealMarket = this.polymarket.hasMarket(token);
+
+    if (hasRealMarket) {
+      // Use REAL Polymarket CLOB midpoint
+      const upMid = this.polymarket.getMidpoint(token);
+      polyPrice = direction === "Up" ? upMid : 1 - upMid;
+    } else {
+      // Fallback: simulate if no market data yet (first few seconds of window)
+      const k = 8;
+      const baseProbability = 1 / (1 + Math.exp(-k * gapPercent));
+      const timeFrac = 1 - timeLeftSec / 900;
+      const adjusted = 0.5 + (baseProbability - 0.5) * (0.6 + 0.4 * timeFrac);
+      polyPrice = direction === "Up" ? adjusted : 1 - adjusted;
+      polyPrice = Math.max(0.02, Math.min(0.98, polyPrice));
+    }
+
+    const takerFee =
+      config.takerFeeRate * Math.min(polyPrice, 1 - polyPrice) * 2;
     const effectivePrice = polyPrice + takerFee;
     const edge = confidence - effectivePrice;
 
@@ -134,8 +152,12 @@ export class SignalEngine {
     const b = 1 / effectivePrice - 1;
     const kellyFraction = (b * confidence - (1 - confidence)) / b;
     const quarterKelly = kellyFraction * config.kellyFraction * config.bankroll;
-    const bookDepth = this.polymarket.getSimulatedBookDepth(token);
-    const suggestedSize = Math.min(quarterKelly, config.maxBetPerToken, bookDepth * 0.8);
+    const bookDepth = this.polymarket.getBookDepth(token);
+    const suggestedSize = Math.min(
+      quarterKelly,
+      config.maxBetPerToken,
+      bookDepth * 0.8
+    );
 
     if (suggestedSize < 1) {
       return {
@@ -144,11 +166,12 @@ export class SignalEngine {
       };
     }
 
+    const src = hasRealMarket ? "LIVE" : "SIM";
     return {
       ...base,
       shouldBet: true,
       suggestedSize: Math.round(suggestedSize * 100) / 100,
-      reason: `✅ ${token} ${direction} | Gap ${absGapPercent.toFixed(2)}% | Conf ${(confidence * 100).toFixed(0)}% | Price ${(polyPrice * 100).toFixed(0)}¢ | Edge ${(edge * 100).toFixed(0)}% | Size $${suggestedSize.toFixed(0)}`,
+      reason: `✅ ${token} ${direction} | Gap ${absGapPercent.toFixed(2)}% | Conf ${(confidence * 100).toFixed(0)}% | Price ${(polyPrice * 100).toFixed(0)}¢ [${src}] | Edge ${(edge * 100).toFixed(0)}% | Size $${suggestedSize.toFixed(0)}`,
     };
   }
 }

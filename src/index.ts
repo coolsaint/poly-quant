@@ -4,7 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import path from "path";
 import { fileURLToPath } from "url";
 import { BinanceFeed } from "./feeds/binance.js";
-import { PolymarketSimulator } from "./feeds/polymarket.js";
+import { PolymarketFeed } from "./feeds/polymarket.js";
 import { WindowManager } from "./engine/window.js";
 import { SignalEngine } from "./engine/signal.js";
 import { PaperTrader } from "./paper/trader.js";
@@ -53,7 +53,7 @@ function broadcast(msg: object): void {
 // ── Engine Components ──
 
 const binance = new BinanceFeed();
-const polymarket = new PolymarketSimulator();
+const polymarket = new PolymarketFeed(TOKENS);
 const windowManager = new WindowManager();
 const signalEngine = new SignalEngine(windowManager, polymarket);
 const paperTrader = new PaperTrader(windowManager);
@@ -82,6 +82,7 @@ function getSnapshot() {
     const state = windowManager.getState(token);
     const gap = windowManager.getGap(token);
     const vol = windowManager.getVolatility(token);
+    const polyState = polymarket.getState(token);
     prices[token] = {
       current: state.currentPrice,
       reference: state.referencePrice,
@@ -90,6 +91,13 @@ function getSnapshot() {
       absGapPercent: gap.absGapPercent,
       gap: gap.gap,
       volatility: vol > 100 ? null : vol,
+      // Polymarket real data
+      polyUpPrice: polyState?.upPrice ?? null,
+      polyDownPrice: polyState?.downPrice ?? null,
+      polyMidpoint: polyState?.midpoint ?? null,
+      polyBookDepth: polyState?.bookDepth ?? null,
+      polyHasMarket: polymarket.hasMarket(token),
+      polyConditionId: polymarket.getConditionId(token),
     };
   }
 
@@ -151,6 +159,24 @@ binance.on("connected", () => {
   addLog("Binance WebSocket connected");
 });
 
+// ── Polymarket Feed ──
+
+polymarket.on("market-found", ({ token, slug, conditionId }: any) => {
+  addLog(`📡 ${token} market found: ${slug} (${conditionId.slice(0, 10)}…)`);
+});
+
+polymarket.on("price", ({ token, upPrice, downPrice }: any) => {
+  // Prices are broadcast as part of the tick snapshot
+});
+
+polymarket.on("window-change", () => {
+  addLog("📡 Polymarket: new window, refreshing markets…");
+});
+
+polymarket.on("error", ({ token, error }: any) => {
+  // Don't spam logs — only log occasionally
+});
+
 binance.on("price", ({ token, price, timestamp }) => {
   const newWindow = windowManager.updatePrice(token as Token, price, timestamp);
 
@@ -207,6 +233,7 @@ server.listen(PORT, () => {
   console.log(`Dashboard: http://localhost:${PORT}`);
   console.log(`WebSocket: ws://localhost:${PORT}/ws`);
   binance.connect();
+  polymarket.start();
 });
 
 // ── Graceful Shutdown ──
@@ -214,6 +241,7 @@ server.listen(PORT, () => {
 function shutdown(): void {
   console.log("Shutting down...");
   binance.disconnect();
+  polymarket.stop();
   wss.close();
   server.close();
   process.exit(0);

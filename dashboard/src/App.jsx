@@ -74,6 +74,15 @@ function TokenCard({ token, data }) {
         <span>Ref: {formatPrice(token, data.reference)}</span>
         <span>Vol: {data.volatility != null ? `${data.volatility.toFixed(4)}%` : "n/a"}</span>
       </div>
+      {data.polyHasMarket && (
+        <div className="poly-prices">
+          <span className="poly-badge">LIVE</span>
+          <span className="up">{(data.polyUpPrice * 100).toFixed(1)}¢</span>
+          <span style={{ color: "#6b7280" }}>/</span>
+          <span className="down">{(data.polyDownPrice * 100).toFixed(1)}¢</span>
+          <span style={{ color: "#4b5563", fontSize: 10 }}>depth ${Math.round(data.polyBookDepth)}</span>
+        </div>
+      )}
     </div>
   );
 }
