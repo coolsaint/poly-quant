@@ -96,11 +96,11 @@ function SignalCard({ token, signal }) {
   );
 
   const gates = [
-    { label: "Time", value: `${signal.timeLeftSec?.toFixed(0) || "—"}s`, pass: signal.timeLeftSec <= 60 && signal.timeLeftSec >= 5 },
-    { label: "Gap", value: formatPct(Math.abs(signal.gapPercent)), pass: Math.abs(signal.gapPercent) >= 0.15 },
-    { label: "Vol", value: signal.volatility != null && signal.volatility < 100 ? `${signal.volatility.toFixed(4)}%` : "n/a", pass: signal.volatility != null && signal.volatility <= 0.03 },
-    { label: "Conf", value: signal.confidence ? `${(signal.confidence * 100).toFixed(1)}%` : "—", pass: signal.confidence >= 0.85 },
-    { label: "Edge", value: signal.edge ? `${(signal.edge * 100).toFixed(1)}%` : "—", pass: signal.edge >= 0.10 },
+    { label: "Time", value: `${signal.timeLeftSec?.toFixed(0) || "—"}s`, pass: signal.timeLeftSec <= 90 && signal.timeLeftSec >= 5 },
+    { label: "Gap", value: formatPct(Math.abs(signal.gapPercent)), pass: Math.abs(signal.gapPercent) >= 0.05 },
+    { label: "Vol", value: signal.volatility != null && signal.volatility < 100 ? `${signal.volatility.toFixed(4)}%` : "n/a", pass: signal.volatility != null && signal.volatility <= 0.15 },
+    { label: "Poly", value: signal.polymarketPrice ? `${(signal.polymarketPrice * 100).toFixed(0)}¢` : "—", pass: signal.polymarketPrice > 0 && signal.polymarketPrice <= 0.75 },
+    { label: "Edge", value: signal.edge ? `${(signal.edge * 100).toFixed(1)}%` : "—", pass: signal.edge >= 0.03 },
   ];
 
   return (

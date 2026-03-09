@@ -4,12 +4,19 @@ import { WindowManager } from "./window.js";
 import { PolymarketFeed } from "../feeds/polymarket.js";
 
 /**
- * 5-Gate Signal Engine
+ * Market Mispricing Signal Engine
  *
- * Always computes all values so the dashboard can display real-time
- * gate status. Only `shouldBet` is gated by the 5 thresholds.
+ * Strategy: Fade Polymarket when it lags Binance reality.
  *
- * Now uses REAL Polymarket prices from the CLOB API.
+ * Edge comes from: Binance shows a clear direction (gap > threshold)
+ * but Polymarket hasn't fully priced it in yet. We buy the cheap side.
+ *
+ * Example: BTC up 0.3% on Binance → should be ~70¢ Up → Poly still at 55¢ → buy Up
+ *
+ * The confidence = how likely the direction holds (from Binance gap + time + vol).
+ * The edge = confidence minus what Polymarket is charging (real CLOB price + fees).
+ *
+ * Always computes all values for dashboard display.
  */
 export class SignalEngine {
   constructor(
@@ -22,7 +29,6 @@ export class SignalEngine {
     const timeLeftSec = window.timeRemainingMs / 1000;
     const state = this.windowManager.getState(token);
 
-    // Base signal with defaults
     const base: Signal = {
       shouldBet: false,
       token,
@@ -37,9 +43,12 @@ export class SignalEngine {
       timeLeftSec,
     };
 
-    // No price data yet
     if (state.referencePrice === 0 || state.currentPrice === 0) {
       return { ...base, reason: `⏳ Waiting for ${token} price data` };
+    }
+
+    if (!this.polymarket.hasMarket(token)) {
+      return { ...base, reason: `⏳ Waiting for ${token} Polymarket data` };
     }
 
     // ── Always compute all values ──
@@ -50,45 +59,61 @@ export class SignalEngine {
     const vol = this.windowManager.getVolatility(token);
     const volSafe = vol > 100 ? 0 : vol;
 
-    // Confidence (computed regardless of gates)
-    // Base: gap drives confidence (0.10% → 57%, 0.30% → 70%, 0.50% → 83%, 0.60%+ → 90%+)
+    // ── Confidence: how likely is the current Binance direction correct? ──
+    //
+    // This is our "true probability" estimate. Key inputs:
+    // 1. Gap size — bigger gap = more likely to hold
+    // 2. Time left — less time = direction more locked in
+    // 3. Volatility — low vol = more stable, direction more reliable
+    // 4. Gap momentum — if gap has been consistent, more confident
+
+    // Base from gap: 0% → 50%, 0.10% → 60%, 0.20% → 70%, 0.40% → 83%, 0.60%+ → 90%
     let confidence = 0.5 + (absGapPercent / 0.6) * 0.4;
     confidence = Math.min(0.95, Math.max(0.5, confidence));
 
-    // Time factor: less time = more locked in (at 90s: 0.94, at 30s: 0.98, at 5s: 1.0)
-    const timeFactor = 1 - (timeLeftSec / 900) * 0.06;
-    confidence *= timeFactor;
+    // Time boost: with <60s left, direction is very sticky
+    // At 90s: ×0.97, at 60s: ×0.98, at 30s: ×0.99, at 10s: ×1.0
+    const timeBoost = 1 - Math.max(0, (timeLeftSec - 10) / 900) * 0.04;
+    confidence *= timeBoost;
 
-    // Vol factor: scale relative to maxVolatility threshold
-    // At 0% vol → 1.0, at maxVol → 0.85, above maxVol → clamped at 0.80
-    const volRatio = volSafe / config.maxVolatility; // 0 to 1+ range
+    // Vol penalty: high vol = direction could reverse
+    const volRatio = volSafe / config.maxVolatility;
     const volFactor = Math.max(0.80, 1 - volRatio * 0.15);
     confidence *= volFactor;
 
-    // ── Real Polymarket price ──
-    let polyPrice: number;
-    const hasRealMarket = this.polymarket.hasMarket(token);
+    // ── Polymarket price (what the market charges) ──
 
-    if (hasRealMarket) {
-      // Use REAL Polymarket CLOB midpoint
-      const upMid = this.polymarket.getMidpoint(token);
-      polyPrice = direction === "Up" ? upMid : 1 - upMid;
-    } else {
-      // Fallback: simulate if no market data yet (first few seconds of window)
-      const k = 8;
-      const baseProbability = 1 / (1 + Math.exp(-k * gapPercent));
-      const timeFrac = 1 - timeLeftSec / 900;
-      const adjusted = 0.5 + (baseProbability - 0.5) * (0.6 + 0.4 * timeFrac);
-      polyPrice = direction === "Up" ? adjusted : 1 - adjusted;
-      polyPrice = Math.max(0.02, Math.min(0.98, polyPrice));
+    const upMid = this.polymarket.getMidpoint(token);
+    // Price for the direction we'd bet on
+    const polyPrice = direction === "Up" ? upMid : 1 - upMid;
+
+    // ── Mispricing detection ──
+    //
+    // "Fair value" from our model vs what Polymarket charges.
+    // If Polymarket is cheap relative to our confidence → edge exists.
+    //
+    // But also check: is Polymarket MOVING toward fair value?
+    // If it's already caught up, the edge is gone.
+
+    const polyChange30s = this.polymarket.getPriceChange(token, 30);
+    const polyMovingTowardUs =
+      polyChange30s !== null &&
+      ((direction === "Up" && polyChange30s > 0.02) ||
+        (direction === "Down" && polyChange30s < -0.02));
+
+    // Slight confidence boost if Polymarket is trending our way (confirmation)
+    if (polyMovingTowardUs) {
+      confidence = Math.min(0.95, confidence * 1.03);
     }
+
+    // ── Edge calculation ──
 
     const takerFee =
       config.takerFeeRate * Math.min(polyPrice, 1 - polyPrice) * 2;
     const effectivePrice = polyPrice + takerFee;
     const edge = confidence - effectivePrice;
 
-    // Populate all values
+    // Populate base
     base.direction = direction;
     base.gapPercent = gapPercent;
     base.volatility = volSafe;
@@ -101,7 +126,7 @@ export class SignalEngine {
       return { ...base, reason: `⏸️  Already bet ${token} this window` };
     }
 
-    // ── Gate 1: Time ──
+    // ── Gate 1: Time — only last 90s ──
     if (timeLeftSec > config.maxTimeLeftSec) {
       return {
         ...base,
@@ -111,15 +136,15 @@ export class SignalEngine {
     if (timeLeftSec < config.minTimeLeftSec) {
       return {
         ...base,
-        reason: `⏰ ${timeLeftSec.toFixed(0)}s left — too late, slippage risk`,
+        reason: `⏰ ${timeLeftSec.toFixed(0)}s left — too late`,
       };
     }
 
-    // ── Gate 2: Price Gap ──
+    // ── Gate 2: Price Gap (Binance direction must be clear) ──
     if (absGapPercent < config.minGapPercent) {
       return {
         ...base,
-        reason: `📏 ${token} gap ${absGapPercent.toFixed(3)}% ($${gap.toFixed(2)}) — need ${config.minGapPercent}%`,
+        reason: `📏 ${token} gap ${absGapPercent.toFixed(3)}% — need ${config.minGapPercent}%`,
       };
     }
 
@@ -131,23 +156,24 @@ export class SignalEngine {
       };
     }
 
-    // ── Gate 4: Confidence ──
-    if (confidence < config.minConfidence) {
+    // ── Gate 4: Polymarket must be cheap (the actual edge) ──
+    // If Polymarket already prices it at >75¢, the edge is gone
+    if (polyPrice > 0.75) {
       return {
         ...base,
-        reason: `🎯 ${token} conf ${(confidence * 100).toFixed(1)}% — need ${config.minConfidence * 100}%`,
+        reason: `💸 ${token} Poly already ${(polyPrice * 100).toFixed(0)}¢ — too expensive`,
       };
     }
 
-    // ── Gate 5: Edge ──
+    // ── Gate 5: Minimum edge after fees ──
     if (edge < config.minEdge) {
       return {
         ...base,
-        reason: `📊 ${token} edge ${(edge * 100).toFixed(1)}% (conf ${(confidence * 100).toFixed(0)}% vs ${(polyPrice * 100).toFixed(0)}¢+fee) — need ${config.minEdge * 100}%`,
+        reason: `📊 ${token} edge ${(edge * 100).toFixed(1)}% (conf ${(confidence * 100).toFixed(0)}% vs poly ${(polyPrice * 100).toFixed(0)}¢+fee) — need ${config.minEdge * 100}%`,
       };
     }
 
-    // ── ALL GATES PASSED ──
+    // ── ALL GATES PASSED — size the bet ──
 
     const b = 1 / effectivePrice - 1;
     const kellyFraction = (b * confidence - (1 - confidence)) / b;
@@ -166,12 +192,11 @@ export class SignalEngine {
       };
     }
 
-    const src = hasRealMarket ? "LIVE" : "SIM";
     return {
       ...base,
       shouldBet: true,
       suggestedSize: Math.round(suggestedSize * 100) / 100,
-      reason: `✅ ${token} ${direction} | Gap ${absGapPercent.toFixed(2)}% | Conf ${(confidence * 100).toFixed(0)}% | Price ${(polyPrice * 100).toFixed(0)}¢ [${src}] | Edge ${(edge * 100).toFixed(0)}% | Size $${suggestedSize.toFixed(0)}`,
+      reason: `✅ ${token} ${direction} | Gap ${absGapPercent.toFixed(2)}% | Conf ${(confidence * 100).toFixed(0)}% | Poly ${(polyPrice * 100).toFixed(0)}¢ | Edge ${(edge * 100).toFixed(1)}% | $${suggestedSize.toFixed(0)}`,
     };
   }
 }

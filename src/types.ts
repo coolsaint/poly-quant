@@ -97,7 +97,6 @@ export interface Config {
   maxTimeLeftSec: number; // Don't bet too early
   minGapPercent: number; // Minimum price gap
   maxVolatility: number; // Maximum 60s volatility
-  minConfidence: number; // Minimum confidence threshold
   minEdge: number; // Minimum edge after fees
   takerFeeRate: number; // Polymarket taker fee
   kellyFraction: number; // Fraction of Kelly criterion

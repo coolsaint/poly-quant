@@ -11,17 +11,16 @@ export const config: Config = {
   minTimeLeftSec: 5,
   maxTimeLeftSec: 90,
 
-  // Gate 2: Price gap — minimum 0.10% gap from reference
-  minGapPercent: 0.10,
+  // Gate 2: Price gap — minimum 0.05% gap from reference (Binance must show clear direction)
+  minGapPercent: 0.05,
 
-  // Gate 3: Volatility — max 0.12% rolling 60s volatility
-  maxVolatility: 0.12,
+  // Gate 3: Volatility — max 0.15% rolling 60s volatility
+  maxVolatility: 0.15,
 
-  // Gate 4: Confidence — minimum 70% (paper trading, will tighten for live)
-  minConfidence: 0.70,
+  // Gate 4: Polymarket price cap — handled in signal engine (max 75¢)
 
-  // Gate 5: Edge — minimum 5% after fees (paper trading, will tighten for live)
-  minEdge: 0.05,
+  // Gate 5: Edge — minimum 3% after fees (mispricing strategy, tighter margins)
+  minEdge: 0.03,
 
   // Fees & sizing
   takerFeeRate: 0.0156, // Polymarket taker fee rate

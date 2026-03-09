@@ -28,6 +28,11 @@ interface MarketInfo {
   windowStart: number; // unix seconds
 }
 
+interface PricePoint {
+  time: number;
+  mid: number;
+}
+
 interface TokenMarketState {
   market: MarketInfo | null;
   upPrice: number;
@@ -35,7 +40,10 @@ interface TokenMarketState {
   midpoint: number; // Up midpoint
   bookDepth: number; // estimated from best bid/ask sizes
   lastFetch: number;
+  lastDepthFetch: number;
   fetchError: string | null;
+  // Price history for detecting lag/momentum
+  priceHistory: PricePoint[]; // last 60s of midpoints
 }
 
 /**
@@ -62,7 +70,9 @@ export class PolymarketFeed extends EventEmitter {
         midpoint: 0.5,
         bookDepth: 100,
         lastFetch: 0,
+        lastDepthFetch: 0,
         fetchError: null,
+        priceHistory: [],
       });
     }
   }
@@ -261,6 +271,12 @@ export class PolymarketFeed extends EventEmitter {
       state.lastFetch = Date.now();
       state.fetchError = null;
 
+      // Track price history (keep last 90s)
+      const now = Date.now();
+      state.priceHistory.push({ time: now, mid: midpoint });
+      const cutoff = now - 90_000;
+      state.priceHistory = state.priceHistory.filter((p) => p.time > cutoff);
+
       this.emit("price", {
         token,
         upPrice: state.upPrice,
@@ -270,9 +286,10 @@ export class PolymarketFeed extends EventEmitter {
     }
 
     // Step 3: Fetch book depth less frequently (every ~15s)
-    if (Date.now() - state.lastFetch > 15000 || state.bookDepth === 100) {
+    if (Date.now() - state.lastDepthFetch > 15000) {
       const depth = await this.fetchBookDepth(state.market.upTokenId);
       state.bookDepth = depth;
+      state.lastDepthFetch = Date.now();
     }
   }
 
@@ -319,6 +336,37 @@ export class PolymarketFeed extends EventEmitter {
    */
   getConditionId(token: Token): string | null {
     return this.states.get(token)?.market?.conditionId ?? null;
+  }
+
+  /**
+   * Get the Polymarket price from N seconds ago (for detecting lag).
+   * Returns null if not enough history.
+   */
+  getPriceSecsAgo(token: Token, secsAgo: number): number | null {
+    const state = this.states.get(token);
+    if (!state || state.priceHistory.length < 2) return null;
+    const targetTime = Date.now() - secsAgo * 1000;
+    // Find the closest point to targetTime
+    let closest = state.priceHistory[0];
+    for (const p of state.priceHistory) {
+      if (Math.abs(p.time - targetTime) < Math.abs(closest.time - targetTime)) {
+        closest = p;
+      }
+    }
+    // Only return if within 5s of target
+    if (Math.abs(closest.time - targetTime) > 5000) return null;
+    return closest.mid;
+  }
+
+  /**
+   * Get price change over last N seconds.
+   * Positive = Up price increasing (market becoming more bullish).
+   */
+  getPriceChange(token: Token, secsAgo: number): number | null {
+    const prev = this.getPriceSecsAgo(token, secsAgo);
+    if (prev === null) return null;
+    const current = this.getMidpoint(token);
+    return current - prev;
   }
 
   /**
