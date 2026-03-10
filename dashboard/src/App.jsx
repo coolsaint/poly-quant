@@ -216,6 +216,37 @@ function TradeLog({ trades, pending }) {
   );
 }
 
+function CopySignals({ signals, targets }) {
+  return (
+    <div className="copy-signals">
+      <h2>Copy Trading</h2>
+      <div className="copy-targets">
+        {(targets || []).map((t) => (
+          <span className="copy-target-badge" key={t.address}>
+            {t.name}
+          </span>
+        ))}
+      </div>
+      {(!signals || signals.length === 0) ? (
+        <div style={{ color: "#6b7280", fontSize: 12 }}>Watching for trades...</div>
+      ) : (
+        [...signals].reverse().map((s, i) => {
+          const time = new Date(s.timestamp * 1000).toLocaleTimeString();
+          return (
+            <div className="copy-entry" key={i}>
+              <span className="copy-alert">COPY</span>
+              <span className="copy-details">
+                <strong>{s.source}</strong> {s.token} {s.outcome} @ {(s.price * 100).toFixed(0)}c | ${s.usdcSize.toFixed(0)} | {s.timeframe}
+              </span>
+              <span className="copy-time">{time}</span>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 function ActivityLog({ logs }) {
   return (
     <div className="activity-log" ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}>
@@ -246,6 +277,8 @@ export default function App() {
           <SignalCard key={t} token={t} signal={data?.signals?.[t]} />
         ))}
       </div>
+
+      <CopySignals signals={data?.copySignals} targets={data?.copyTargets} />
 
       <div className="grid grid-3">
         <StatsPanel stats={data?.stats} />

@@ -5,6 +5,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { BinanceFeed } from "./feeds/binance.js";
 import { PolymarketFeed } from "./feeds/polymarket.js";
+import { CopyWatcher } from "./feeds/copy-watcher.js";
+import type { CopySignal } from "./feeds/copy-watcher.js";
 import { WindowManager } from "./engine/window.js";
 import { SignalEngine } from "./engine/signal.js";
 import { PaperTrader } from "./paper/trader.js";
@@ -54,6 +56,7 @@ function broadcast(msg: object): void {
 
 const binance = new BinanceFeed();
 const polymarket = new PolymarketFeed(TOKENS);
+const copyWatcher = new CopyWatcher(3000); // poll every 3 seconds
 const windowManager = new WindowManager();
 const signalEngine = new SignalEngine(windowManager, polymarket);
 const paperTrader = new PaperTrader(windowManager);
@@ -62,6 +65,7 @@ let connected = false;
 let previousWindowId = "";
 let lastSignals = new Map<Token, Signal>();
 let recentLogs: string[] = [];
+let recentCopySignals: CopySignal[] = [];
 
 function addLog(msg: string): void {
   const ts = new Date().toLocaleTimeString();
@@ -124,6 +128,8 @@ function getSnapshot() {
     stats,
     pending,
     recentTrades: allTrades,
+    copySignals: recentCopySignals.slice(-20),
+    copyTargets: copyWatcher.getTargets(),
     logs: recentLogs.slice(-50),
     connected,
   };
@@ -175,6 +181,24 @@ polymarket.on("window-change", () => {
 
 polymarket.on("error", ({ token, error }: any) => {
   // Don't spam logs — only log occasionally
+});
+
+// ── Copy Watcher ──
+
+copyWatcher.on("copy-signal", (signal: CopySignal) => {
+  const msg = `🚨 COPY: ${signal.source} → ${signal.token} ${signal.outcome} @ ${(signal.price * 100).toFixed(0)}¢ | $${signal.usdcSize.toFixed(0)} | ${signal.timeframe} window`;
+  addLog(msg);
+
+  // Store for dashboard display
+  recentCopySignals.push(signal);
+  if (recentCopySignals.length > 50) recentCopySignals = recentCopySignals.slice(-50);
+
+  // Broadcast immediately to all dashboard clients
+  broadcast({ type: "copy-signal", data: signal });
+});
+
+copyWatcher.on("error", ({ target, error }: any) => {
+  // Don't spam — these are usually transient network issues
 });
 
 binance.on("price", ({ token, price, timestamp }) => {
@@ -234,6 +258,7 @@ server.listen(PORT, () => {
   console.log(`WebSocket: ws://localhost:${PORT}/ws`);
   binance.connect();
   polymarket.start();
+  copyWatcher.start();
 });
 
 // ── Graceful Shutdown ──
@@ -242,6 +267,7 @@ function shutdown(): void {
   console.log("Shutting down...");
   binance.disconnect();
   polymarket.stop();
+  copyWatcher.stop();
   wss.close();
   server.close();
   process.exit(0);
