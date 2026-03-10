@@ -111,14 +111,14 @@ interface RawActivity {
 }
 
 interface RawClosedPosition {
-  market: string;
+  title: string;
   slug: string;
+  eventSlug: string;
   outcome: string;
   avgPrice: number;
-  size: number;
-  totalTraded: number;
-  amountWon: number;
-  pnl: number;
+  totalBought: number;
+  realizedPnl: number;
+  curPrice: number;
 }
 
 export class CopyWatcher extends EventEmitter {
@@ -304,15 +304,15 @@ export class CopyWatcher extends EventEmitter {
       const positions: RawClosedPosition[] = await res.json();
 
       const recentClosed: ClosedPosition[] = positions.map((p) => ({
-        market: p.market,
-        slug: p.slug,
+        market: p.title,
+        slug: p.eventSlug || p.slug,
         outcome: p.outcome,
         avgPrice: p.avgPrice,
-        size: p.size,
-        totalTraded: p.totalTraded,
-        amountWon: p.amountWon,
-        pnl: p.pnl,
-        won: p.pnl > 0,
+        size: p.totalBought,
+        totalTraded: p.totalBought * p.avgPrice,
+        amountWon: p.realizedPnl + p.totalBought * p.avgPrice,
+        pnl: p.realizedPnl,
+        won: p.realizedPnl > 0,
       }));
 
       const profile = this.profiles.get(target.address);
