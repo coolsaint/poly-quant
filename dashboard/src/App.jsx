@@ -1,14 +1,11 @@
 import React from "react";
 import { useWebSocket } from "./hooks/useWebSocket.js";
-import { formatPrice, formatPnl, formatPct } from "./lib/formatters.js";
-
-const TOKENS = ["BTC", "ETH", "SOL", "XRP"];
 
 function Header({ connected }) {
   return (
     <div className="header">
       <h1>POLY-QUANT</h1>
-      <span className="mode">PAPER</span>
+      <span className="mode">COPY BOT</span>
       <div className="status">
         <span className={`dot ${connected ? "on" : ""}`} />
         {connected ? "Live" : "Disconnected"}
@@ -17,243 +14,65 @@ function Header({ connected }) {
   );
 }
 
-function WindowBar({ window: w }) {
-  if (!w) return null;
-  const total = 15 * 60;
-  const pct = (w.timeElapsedSec / total) * 100;
-  const zoneClass = w.inZone ? "active" : w.timeLeftSec < 5 ? "late" : "waiting";
-  const zoneLabel = w.inZone ? "ACTIVE ZONE" : w.timeLeftSec < 5 ? "TOO LATE" : "WAITING";
+function TraderCard({ profile }) {
+  if (!profile) return null;
 
-  const fillColor = w.inZone
-    ? "linear-gradient(90deg, #22c55e, #16a34a)"
-    : w.timeLeftSec < 60
-      ? "linear-gradient(90deg, #ef4444, #dc2626)"
-      : "linear-gradient(90deg, #3b82f6, #2563eb)";
-
-  const start = new Date(w.startTime).toLocaleTimeString();
-  const end = new Date(w.endTime).toLocaleTimeString();
+  const closed = profile.recentClosed || [];
+  const wins = closed.filter((p) => p.won).length;
+  const losses = closed.length - wins;
 
   return (
-    <div className="window-bar">
-      <div className="row">
-        <span style={{ color: "#6b7280" }}>{start} → {end}</span>
-        <span className="time-left">{Math.floor(w.timeLeftSec)}s</span>
-        <span className={`zone ${zoneClass}`}>{zoneLabel}</span>
-      </div>
-      <div className="progress-track">
-        <div
-          className="progress-fill"
-          style={{ width: `${Math.min(100, pct)}%`, background: fillColor }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function TokenCard({ token, data }) {
-  if (!data) return (
-    <div className="token-card">
-      <div className="token-header"><span className="token-name">{token}</span></div>
-      <div className="price" style={{ color: "#6b7280" }}>Waiting...</div>
-    </div>
-  );
-
-  const gapClass = data.absGapPercent < 0.01 ? "flat" : data.direction === "Up" ? "up" : "down";
-  const arrow = data.direction === "Up" ? "▲" : "▼";
-
-  return (
-    <div className="token-card">
-      <div className="token-header">
-        <span className="token-name">{token}</span>
-        <span className={`gap ${gapClass}`}>
-          {arrow} {formatPct(data.absGapPercent)}
+    <div className="trader-card">
+      <div className="trader-header">
+        <span className="trader-name">{profile.name}</span>
+        <span className="trader-address">
+          {profile.address.slice(0, 6)}...{profile.address.slice(-4)}
         </span>
       </div>
-      <div className="price">{formatPrice(token, data.current)}</div>
-      <div className="meta">
-        <span>Ref: {formatPrice(token, data.reference)}</span>
-        <span>Vol: {data.volatility != null ? `${data.volatility.toFixed(4)}%` : "n/a"}</span>
+      <div className="trader-stats">
+        <span className="win">{wins}W</span>
+        <span className="sep">/</span>
+        <span className="loss">{losses}L</span>
+        <span className="of">last {closed.length}</span>
       </div>
-      {data.polyHasMarket && (
-        <div className="poly-prices">
-          <span className="poly-badge">LIVE</span>
-          <span className="up">{(data.polyUpPrice * 100).toFixed(1)}¢</span>
-          <span style={{ color: "#6b7280" }}>/</span>
-          <span className="down">{(data.polyDownPrice * 100).toFixed(1)}¢</span>
-          <span style={{ color: "#4b5563", fontSize: 10 }}>depth ${Math.round(data.polyBookDepth)}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SignalCard({ token, signal }) {
-  if (!signal) return (
-    <div className="signal-card">
-      <div className="signal-header">{token}</div>
-      <div style={{ color: "#6b7280", fontSize: 12 }}>No data</div>
-    </div>
-  );
-
-  const gates = [
-    { label: "Time", value: `${signal.timeLeftSec?.toFixed(0) || "—"}s`, pass: signal.timeLeftSec <= 90 && signal.timeLeftSec >= 5 },
-    { label: "Gap", value: formatPct(Math.abs(signal.gapPercent)), pass: Math.abs(signal.gapPercent) >= 0.05 },
-    { label: "Vol", value: signal.volatility != null && signal.volatility < 100 ? `${signal.volatility.toFixed(4)}%` : "n/a", pass: signal.volatility != null && signal.volatility <= 0.15 },
-    { label: "Poly", value: signal.polymarketPrice ? `${(signal.polymarketPrice * 100).toFixed(0)}¢` : "—", pass: signal.polymarketPrice > 0 && signal.polymarketPrice <= 0.75 },
-    { label: "Edge", value: signal.edge ? `${(signal.edge * 100).toFixed(1)}%` : "—", pass: signal.edge >= 0.03 },
-  ];
-
-  return (
-    <div className="signal-card" style={signal.shouldBet ? { borderColor: "#22c55e" } : {}}>
-      <div className="signal-header">
-        {token} {signal.shouldBet && <span style={{ color: "#22c55e" }}>● BET</span>}
-      </div>
-      {gates.map((g, i) => (
-        <div className="gate" key={i}>
-          <span className="label">{g.label}</span>
-          <span className={`value ${g.pass ? "pass" : signal.timeLeftSec > 60 ? "wait" : "fail"}`}>
-            {g.value}
-          </span>
-        </div>
-      ))}
-      <div className="signal-reason">{signal.reason}</div>
-    </div>
-  );
-}
-
-function StatsPanel({ stats }) {
-  if (!stats) return null;
-  const roi = stats.totalWagered > 0 ? (stats.totalPnl / stats.totalWagered) * 100 : 0;
-  const pnlClass = stats.totalPnl >= 0 ? "pnl-positive" : "pnl-negative";
-
-  return (
-    <div className="stats-panel">
-      <h2>Session Stats</h2>
-      <div className="stat-row">
-        <span className="label">Trades</span>
-        <span className="value">{stats.totalTrades}</span>
-      </div>
-      <div className="stat-row">
-        <span className="label">W / L</span>
-        <span className="value">{stats.wins} / {stats.losses}</span>
-      </div>
-      <div className="stat-row">
-        <span className="label">Win Rate</span>
-        <span className="value">{(stats.winRate * 100).toFixed(1)}%</span>
-      </div>
-      <div className="stat-row">
-        <span className="label">P&L</span>
-        <span className={`value ${pnlClass}`}>{formatPnl(stats.totalPnl)}</span>
-      </div>
-      <div className="stat-row">
-        <span className="label">Wagered</span>
-        <span className="value">${stats.totalWagered.toFixed(2)}</span>
-      </div>
-      <div className="stat-row">
-        <span className="label">ROI</span>
-        <span className={`value ${pnlClass}`}>{roi.toFixed(1)}%</span>
-      </div>
-      <div className="stat-row">
-        <span className="label">Peak P&L</span>
-        <span className="value">${stats.peakPnl.toFixed(2)}</span>
-      </div>
-      <div className="stat-row">
-        <span className="label">Max Drawdown</span>
-        <span className="value" style={{ color: "#ef4444" }}>${stats.maxDrawdown.toFixed(2)}</span>
-      </div>
-      {stats.byToken && (
-        <>
-          <h2 style={{ marginTop: 16 }}>By Token</h2>
-          {TOKENS.map((t) => {
-            const ts = stats.byToken[t];
-            if (!ts || ts.trades === 0) return null;
-            const wr = ((ts.wins / ts.trades) * 100).toFixed(0);
-            return (
-              <div className="stat-row" key={t}>
-                <span className="label">{t}</span>
-                <span className="value">
-                  {ts.wins}/{ts.trades} ({wr}%) <span className={ts.pnl >= 0 ? "pnl-positive" : "pnl-negative"}>{formatPnl(ts.pnl)}</span>
-                </span>
-              </div>
-            );
-          })}
-        </>
-      )}
-    </div>
-  );
-}
-
-function TradeLog({ trades, pending }) {
-  return (
-    <div className="trade-log">
-      <h2>Trade Log</h2>
-      {pending && pending.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
-          {pending.map((t) => (
-            <span className="pending-badge" key={t.id}>
-              {t.token} {t.direction} @ {(t.entryPrice * 100).toFixed(0)}c | ${t.size.toFixed(2)}
-            </span>
-          ))}
-        </div>
-      )}
-      {(!trades || trades.length === 0) ? (
-        <div style={{ color: "#6b7280", fontSize: 12 }}>No trades yet</div>
-      ) : (
-        [...trades].reverse().map((t) => (
-          <div className="trade-entry" key={t.id}>
-            <span className="icon">{t.won ? "✅" : "❌"}</span>
-            <span className="details">
-              {t.token} {t.direction} @ {(t.entryPrice * 100).toFixed(0)}c
-              {" "}(ref {formatPrice(t.token, t.referencePrice)} → {formatPrice(t.token, t.resolutionPrice)})
-            </span>
-            <span className={`pnl ${(t.pnl ?? 0) >= 0 ? "pnl-positive" : "pnl-negative"}`}>
-              {formatPnl(t.pnl)}
-            </span>
-          </div>
-        ))
-      )}
-    </div>
-  );
-}
-
-function CopySignals({ signals, targets }) {
-  return (
-    <div className="copy-signals">
-      <h2>Copy Trading</h2>
-      <div className="copy-targets">
-        {(targets || []).map((t) => (
-          <span className="copy-target-badge" key={t.address}>
-            {t.name}
-          </span>
-        ))}
-      </div>
-      {(!signals || signals.length === 0) ? (
-        <div style={{ color: "#6b7280", fontSize: 12 }}>Watching for trades...</div>
-      ) : (
-        [...signals].reverse().map((s, i) => {
-          const time = new Date(s.timestamp * 1000).toLocaleTimeString();
-          return (
-            <div className="copy-entry" key={i}>
-              <span className="copy-alert">COPY</span>
-              <span className="copy-details">
-                <strong>{s.source}</strong> {s.token} {s.outcome} @ {(s.price * 100).toFixed(0)}c | ${s.usdcSize.toFixed(0)} | {s.timeframe}
+      <div className="trader-trades">
+        {closed.length === 0 ? (
+          <div className="empty">Loading trades...</div>
+        ) : (
+          closed.map((t, i) => (
+            <div className={`trade-row ${t.won ? "won" : "lost"}`} key={i}>
+              <span className="result">{t.won ? "W" : "L"}</span>
+              <span className="market">{t.market}</span>
+              <span className="outcome">{t.outcome} @ {(t.avgPrice * 100).toFixed(0)}c</span>
+              <span className={`pnl ${t.pnl >= 0 ? "pos" : "neg"}`}>
+                {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(2)}
               </span>
-              <span className="copy-time">{time}</span>
             </div>
-          );
-        })
-      )}
+          ))
+        )}
+      </div>
     </div>
   );
 }
 
-function ActivityLog({ logs }) {
+function CopyAlerts({ signals }) {
+  if (!signals || signals.length === 0) return null;
+
   return (
-    <div className="activity-log" ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}>
-      <h2>Activity</h2>
-      {(logs || []).map((line, i) => (
-        <div className="log-line" key={i}>{line}</div>
-      ))}
+    <div className="copy-alerts">
+      <h2>Live Alerts</h2>
+      {[...signals].reverse().map((s, i) => {
+        const time = new Date(s.timestamp * 1000).toLocaleTimeString();
+        return (
+          <div className="alert-row" key={i}>
+            <span className="alert-badge">COPY</span>
+            <span className="alert-info">
+              <strong>{s.source}</strong> {s.token} {s.outcome} @ {(s.price * 100).toFixed(0)}c | ${s.usdcSize.toFixed(0)} | {s.timeframe}
+            </span>
+            <span className="alert-time">{time}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -261,29 +80,20 @@ function ActivityLog({ logs }) {
 export default function App() {
   const { data, connected } = useWebSocket();
 
+  const profiles = data?.profiles || [];
+  const signals = data?.copySignals || [];
+
   return (
     <div className="container">
       <Header connected={connected} />
-      <WindowBar window={data?.window} />
-
-      <div className="grid grid-4">
-        {TOKENS.map((t) => (
-          <TokenCard key={t} token={t} data={data?.prices?.[t]} />
+      <CopyAlerts signals={signals} />
+      <div className="traders-grid">
+        {profiles.map((p) => (
+          <TraderCard key={p.address} profile={p} />
         ))}
-      </div>
-
-      <div className="grid grid-4">
-        {TOKENS.map((t) => (
-          <SignalCard key={t} token={t} signal={data?.signals?.[t]} />
-        ))}
-      </div>
-
-      <CopySignals signals={data?.copySignals} targets={data?.copyTargets} />
-
-      <div className="grid grid-3">
-        <StatsPanel stats={data?.stats} />
-        <TradeLog trades={data?.recentTrades} pending={data?.pending} />
-        <ActivityLog logs={data?.logs} />
+        {profiles.length === 0 && (
+          <div className="empty">Connecting to traders...</div>
+        )}
       </div>
     </div>
   );

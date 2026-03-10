@@ -3,12 +3,9 @@ import { EventEmitter } from "events";
 /**
  * Copy-Trading Watcher
  *
- * Polls the Polymarket Data API every few seconds to detect new trades
- * from target wallets (cryptoaus, solidtaken). When a new crypto up/down
- * BUY is detected, emits a "copy-signal" event.
- *
- * Strategy: These traders have 100% win rate on 4-hour crypto markets.
- * We copy their trades as soon as they appear.
+ * Monitors target wallets on Polymarket. Detects new crypto up/down
+ * BUY trades and emits copy-signal events. Also fetches each trader's
+ * recent closed positions for display.
  */
 
 interface WatchTarget {
@@ -17,25 +14,45 @@ interface WatchTarget {
 }
 
 export interface CopySignal {
-  source: string; // trader name
+  source: string;
   sourceAddress: string;
-  market: string; // e.g., "Bitcoin Up or Down - March 9, 4:00PM-8:00PM ET"
-  slug: string; // e.g., "btc-updown-4h-1773086400"
+  market: string;
+  slug: string;
   conditionId: string;
-  outcome: string; // "Up" or "Down"
+  outcome: string;
   outcomeIndex: number;
-  asset: string; // CLOB token ID
-  price: number; // price they paid (e.g., 0.47)
-  size: number; // shares
-  usdcSize: number; // dollar amount
-  timestamp: number; // unix seconds
-  token: string; // extracted: BTC, ETH, SOL, XRP
-  timeframe: string; // extracted: 4h, 15m, 1h, etc.
+  asset: string;
+  price: number;
+  size: number;
+  usdcSize: number;
+  timestamp: number;
+  token: string;
+  timeframe: string;
+}
+
+export interface ClosedPosition {
+  market: string;
+  slug: string;
+  outcome: string;
+  avgPrice: number;
+  size: number;
+  totalTraded: number;
+  amountWon: number;
+  pnl: number;
+  won: boolean;
+}
+
+export interface TraderProfile {
+  name: string;
+  address: string;
+  pnl: number | null;
+  positionsValue: number | null;
+  recentClosed: ClosedPosition[];
+  lastFetch: number;
 }
 
 const DATA_API = "https://data-api.polymarket.com";
 
-// Target traders to copy
 const TARGETS: WatchTarget[] = [
   {
     name: "cryptoaus",
@@ -47,7 +64,6 @@ const TARGETS: WatchTarget[] = [
   },
 ];
 
-// Slugs we care about (crypto up/down markets)
 const CRYPTO_SLUG_PATTERNS = [
   "btc-updown-",
   "eth-updown-",
@@ -68,7 +84,6 @@ function extractTimeframeFromSlug(slug: string): string {
   if (slug.includes("-15m-")) return "15m";
   if (slug.includes("-5m-")) return "5m";
   if (slug.includes("-1h-")) return "1h";
-  // Older format: just has the hourly time like "btc-updown-1773086400"
   return "unknown";
 }
 
@@ -95,20 +110,40 @@ interface RawActivity {
   name: string;
 }
 
+interface RawClosedPosition {
+  market: string;
+  slug: string;
+  outcome: string;
+  avgPrice: number;
+  size: number;
+  totalTraded: number;
+  amountWon: number;
+  pnl: number;
+}
+
 export class CopyWatcher extends EventEmitter {
   private pollInterval: ReturnType<typeof setInterval> | null = null;
-  private lastSeenTimestamp = new Map<string, number>(); // address → latest timestamp
-  private seenTxHashes = new Set<string>(); // dedup by tx hash
+  private profileInterval: ReturnType<typeof setInterval> | null = null;
+  private lastSeenTimestamp = new Map<string, number>();
+  private seenTxHashes = new Set<string>();
   private pollFrequencyMs: number;
+  private profiles = new Map<string, TraderProfile>();
 
   constructor(pollFrequencyMs = 3000) {
     super();
     this.pollFrequencyMs = pollFrequencyMs;
 
-    // Initialize last-seen to "now" so we don't replay old trades
     const now = Math.floor(Date.now() / 1000);
     for (const target of TARGETS) {
       this.lastSeenTimestamp.set(target.address, now);
+      this.profiles.set(target.address, {
+        name: target.name,
+        address: target.address,
+        pnl: null,
+        positionsValue: null,
+        recentClosed: [],
+        lastFetch: 0,
+      });
     }
   }
 
@@ -119,8 +154,13 @@ export class CopyWatcher extends EventEmitter {
     for (const t of TARGETS) {
       console.log(`   📎 ${t.name}: ${t.address}`);
     }
-    this.poll(); // immediate first poll
+
+    this.poll();
     this.pollInterval = setInterval(() => this.poll(), this.pollFrequencyMs);
+
+    // Fetch profiles immediately, then every 60s
+    this.fetchAllProfiles();
+    this.profileInterval = setInterval(() => this.fetchAllProfiles(), 60000);
   }
 
   stop(): void {
@@ -128,23 +168,48 @@ export class CopyWatcher extends EventEmitter {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
+    if (this.profileInterval) {
+      clearInterval(this.profileInterval);
+      this.profileInterval = null;
+    }
     console.log("👀 Copy-watcher stopped");
   }
 
-  /**
-   * Add a new trader to watch.
-   */
   addTarget(name: string, address: string): void {
-    // Don't add duplicates
     if (TARGETS.find((t) => t.address === address)) return;
     TARGETS.push({ name, address });
     this.lastSeenTimestamp.set(address, Math.floor(Date.now() / 1000));
+    this.profiles.set(address, {
+      name,
+      address,
+      pnl: null,
+      positionsValue: null,
+      recentClosed: [],
+      lastFetch: 0,
+    });
+    this.fetchProfile({ name, address });
     console.log(`👀 Now watching: ${name} (${address})`);
   }
 
   getTargets(): WatchTarget[] {
     return [...TARGETS];
   }
+
+  getProfiles(): TraderProfile[] {
+    return TARGETS.map(
+      (t) =>
+        this.profiles.get(t.address) ?? {
+          name: t.name,
+          address: t.address,
+          pnl: null,
+          positionsValue: null,
+          recentClosed: [],
+          lastFetch: 0,
+        }
+    );
+  }
+
+  // ── Activity polling (new trade detection) ──
 
   private async poll(): Promise<void> {
     await Promise.allSettled(
@@ -160,33 +225,21 @@ export class CopyWatcher extends EventEmitter {
         headers: { Accept: "application/json" },
       });
 
-      if (!res.ok) {
-        this.emit("error", {
-          target: target.name,
-          error: `API ${res.status}`,
-        });
-        return;
-      }
+      if (!res.ok) return;
 
       const activities: RawActivity[] = await res.json();
 
       for (const activity of activities) {
-        // Skip if already seen
         if (this.seenTxHashes.has(activity.transactionHash)) continue;
 
-        // Skip if older than our start time
         const lastSeen = this.lastSeenTimestamp.get(target.address) ?? 0;
         if (activity.timestamp <= lastSeen) continue;
 
-        // Mark as seen
         this.seenTxHashes.add(activity.transactionHash);
-
-        // Update last seen timestamp
         if (activity.timestamp > lastSeen) {
           this.lastSeenTimestamp.set(target.address, activity.timestamp);
         }
 
-        // Only care about BUY trades on crypto up/down markets
         if (activity.type !== "TRADE") continue;
         if (activity.side !== "BUY") continue;
 
@@ -220,16 +273,61 @@ export class CopyWatcher extends EventEmitter {
         this.emit("copy-signal", signal);
       }
 
-      // Keep seenTxHashes from growing forever (keep last 500)
       if (this.seenTxHashes.size > 500) {
         const arr = [...this.seenTxHashes];
         this.seenTxHashes = new Set(arr.slice(-200));
       }
-    } catch (err: any) {
-      this.emit("error", {
-        target: target.name,
-        error: err.message,
+    } catch {
+      // transient errors, don't spam
+    }
+  }
+
+  // ── Profile fetching (closed positions) ──
+
+  private async fetchAllProfiles(): Promise<void> {
+    await Promise.allSettled(
+      TARGETS.map((target) => this.fetchProfile(target))
+    );
+    this.emit("profiles-updated", this.getProfiles());
+  }
+
+  private async fetchProfile(target: WatchTarget): Promise<void> {
+    try {
+      const url = `${DATA_API}/closed-positions?user=${target.address}&limit=5&sortBy=endDate&sortOrder=desc`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(8000),
+        headers: { Accept: "application/json" },
       });
+
+      if (!res.ok) return;
+
+      const positions: RawClosedPosition[] = await res.json();
+
+      const recentClosed: ClosedPosition[] = positions.map((p) => ({
+        market: p.market,
+        slug: p.slug,
+        outcome: p.outcome,
+        avgPrice: p.avgPrice,
+        size: p.size,
+        totalTraded: p.totalTraded,
+        amountWon: p.amountWon,
+        pnl: p.pnl,
+        won: p.pnl > 0,
+      }));
+
+      const profile = this.profiles.get(target.address);
+      if (profile) {
+        profile.recentClosed = recentClosed;
+        profile.lastFetch = Date.now();
+
+        // Compute simple stats from these 5 trades
+        const wins = recentClosed.filter((p) => p.won).length;
+        console.log(
+          `📊 ${target.name}: ${wins}/${recentClosed.length} wins in last 5 closed`
+        );
+      }
+    } catch {
+      // transient
     }
   }
 }
