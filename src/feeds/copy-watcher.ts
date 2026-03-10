@@ -293,13 +293,16 @@ export class CopyWatcher extends EventEmitter {
 
   private async fetchProfile(target: WatchTarget): Promise<void> {
     try {
-      const url = `${DATA_API}/closed-positions?user=${target.address}&limit=5&sortBy=endDate&sortOrder=desc`;
+      const url = `${DATA_API}/closed-positions?user=${target.address}&limit=5`;
       const res = await fetch(url, {
         signal: AbortSignal.timeout(8000),
         headers: { Accept: "application/json" },
       });
 
-      if (!res.ok) return;
+      if (!res.ok) {
+        console.log(`❌ closed-positions API ${res.status} for ${target.name}`);
+        return;
+      }
 
       const positions: RawClosedPosition[] = await res.json();
 
@@ -326,8 +329,8 @@ export class CopyWatcher extends EventEmitter {
           `📊 ${target.name}: ${wins}/${recentClosed.length} wins in last 5 closed`
         );
       }
-    } catch {
-      // transient
+    } catch (err: any) {
+      console.log(`❌ profile fetch error for ${target.name}: ${err.message}`);
     }
   }
 }
